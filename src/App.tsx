@@ -1,12 +1,24 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import './App.css'
+import {
+  SUTERH_ENCARGADO_PERMANENTE,
+  SUTERH_META,
+  UTHGRA_401_META,
+  UTHGRA_CCT401_PUBLICOS,
+} from './convenios'
 import { formatArs, parseArsInput, roundMoney } from './money'
+import { exportElementToPdf } from './pdfExport'
 
 type MoneyLine = {
   id: string
   concepto: string
   importe: number
 }
+
+const CONCEPTO_BASICO_DEFAULT = 'Sueldo básico / jornal mensual'
+const CONCEPTO_ANTIGUEDAD = 'Antigüedad (convenio)'
+const CONCEPTO_HE50 = 'Horas extras al 50%'
+const CONCEPTO_HE100 = 'Horas extras al 100%'
 
 function newLine(partial?: Partial<MoneyLine>): MoneyLine {
   return {
@@ -32,7 +44,7 @@ const MESES = [
 ] as const
 
 const defaultHaberes: MoneyLine[] = [
-  newLine({ concepto: 'Sueldo básico / jornal', importe: 0 }),
+  newLine({ concepto: CONCEPTO_BASICO_DEFAULT, importe: 0 }),
 ]
 
 const defaultDescuentos: MoneyLine[] = [
@@ -41,7 +53,40 @@ const defaultDescuentos: MoneyLine[] = [
   newLine({ concepto: 'Obra social', importe: 0 }),
 ]
 
+function finDePeriodo(anio: number, mesIdx: number): Date {
+  return new Date(anio, mesIdx + 1, 0)
+}
+
+function aniosCompletosDesde(fechaIngresoStr: string, fin: Date): number {
+  const d = new Date(`${fechaIngresoStr}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return 0
+  let años = fin.getFullYear() - d.getFullYear()
+  const m = fin.getMonth() - d.getMonth()
+  if (m < 0 || (m === 0 && fin.getDate() < d.getDate())) años--
+  return Math.max(0, años)
+}
+
+function ensureFirstBasico(rows: MoneyLine[], importe: number): MoneyLine[] {
+  const next = [...rows]
+  if (next.length === 0) {
+    return [newLine({ concepto: CONCEPTO_BASICO_DEFAULT, importe })]
+  }
+  next[0] = {
+    ...next[0],
+    concepto: next[0].concepto?.trim() ? next[0].concepto : CONCEPTO_BASICO_DEFAULT,
+    importe,
+  }
+  return next
+}
+
+function basicoDesdeHaberes(rows: MoneyLine[]): number {
+  return rows[0]?.importe ?? 0
+}
+
 function App() {
+  const reciboRef = useRef<HTMLElement | null>(null)
+  const [pdfBusy, setPdfBusy] = useState(false)
+
   const [consorcioNombre, setConsorcioNombre] = useState('')
   const [consorcioCuit, setConsorcioCuit] = useState('')
   const [consorcioDomicilio, setConsorcioDomicilio] = useState('')
@@ -56,6 +101,17 @@ function App() {
   const [mesIdx, setMesIdx] = useState(now.getMonth())
   const [anio, setAnio] = useState(now.getFullYear())
 
+  const [fechaIngreso, setFechaIngreso] = useState('')
+  const [antiguedadDesdeFecha, setAntiguedadDesdeFecha] = useState(true)
+  const [aniosAntiguedadManual, setAniosAntiguedadManual] = useState(0)
+  const [pctAntiguedadAnual, setPctAntiguedadAnual] = useState(2)
+  const [horasNormalesMes, setHorasNormalesMes] = useState(200)
+  const [horasExtra50, setHorasExtra50] = useState(0)
+  const [horasExtra100, setHorasExtra100] = useState(0)
+
+  const [suterhEscalaId, setSuterhEscalaId] = useState('')
+  const [uthgraEscalaId, setUthgraEscalaId] = useState('')
+
   const [haberes, setHaberes] = useState<MoneyLine[]>(defaultHaberes)
   const [descuentos, setDescuentos] = useState<MoneyLine[]>(defaultDescuentos)
 
@@ -68,6 +124,39 @@ function App() {
     [descuentos],
   )
   const neto = roundMoney(totalHaberes - totalDescuentos)
+
+  const finPeriodo = useMemo(() => finDePeriodo(anio, mesIdx), [anio, mesIdx])
+
+  const aniosAntiguedadEfectivos = useMemo(() => {
+    if (antiguedadDesdeFecha && fechaIngreso) {
+      return aniosCompletosDesde(fechaIngreso, finPeriodo)
+    }
+    return Math.max(0, aniosAntiguedadManual)
+  }, [antiguedadDesdeFecha, fechaIngreso, finPeriodo, aniosAntiguedadManual])
+
+  const basicoMensual = basicoDesdeHaberes(haberes)
+
+  const preview = useMemo(() => {
+    const base = basicoMensual
+    const ant = roundMoney(base * (pctAntiguedadAnual / 100) * aniosAntiguedadEfectivos)
+    const horasMes = Math.max(1, horasNormalesMes)
+    const valorHora = roundMoney(base / horasMes)
+    const he50 = roundMoney(valorHora * 1.5 * horasExtra50)
+    const he100 = roundMoney(valorHora * 2 * horasExtra100)
+    return { ant, valorHora, he50, he100 }
+  }, [
+    basicoMensual,
+    pctAntiguedadAnual,
+    aniosAntiguedadEfectivos,
+    horasNormalesMes,
+    horasExtra50,
+    horasExtra100,
+  ])
+
+  const uthgraSeleccion = useMemo(
+    () => UTHGRA_CCT401_PUBLICOS.find((r) => r.id === uthgraEscalaId),
+    [uthgraEscalaId],
+  )
 
   function updateHaber(id: string, patch: Partial<MoneyLine>) {
     setHaberes((rows) =>
@@ -111,6 +200,70 @@ function App() {
     })
   }
 
+  const aplicarEscalaSuterh = useCallback(
+    (id: string) => {
+      setSuterhEscalaId(id)
+      setUthgraEscalaId('')
+      const row = SUTERH_ENCARGADO_PERMANENTE.find((r) => r.id === id)
+      if (!row) return
+      setEmpleadoCategoria(row.label)
+      setHaberes((h) => ensureFirstBasico(h, row.basicoMensual))
+    },
+    [],
+  )
+
+  const aplicarEscalaUthgra = useCallback((id: string) => {
+    setUthgraEscalaId(id)
+    setSuterhEscalaId('')
+    const row = UTHGRA_CCT401_PUBLICOS.find((r) => r.id === id)
+    if (!row) return
+    setEmpleadoCategoria(`${row.label} (${UTHGRA_401_META.nombre})`)
+    setHaberes((h) => ensureFirstBasico(h, row.basicoMarzo2026))
+  }, [])
+
+  function incorporarAntiguedadYExtras() {
+    const base = basicoMensual
+    if (base <= 0) return
+
+    const ant = preview.ant
+    const m50 = preview.he50
+    const m100 = preview.he100
+
+    setHaberes((rows) => {
+      const filtradas = rows.filter(
+        (r) =>
+          ![
+            CONCEPTO_ANTIGUEDAD,
+            CONCEPTO_HE50,
+            CONCEPTO_HE100,
+          ].includes(r.concepto),
+      )
+      const add: MoneyLine[] = []
+      if (ant > 0) add.push(newLine({ concepto: CONCEPTO_ANTIGUEDAD, importe: ant }))
+      if (m50 > 0) add.push(newLine({ concepto: CONCEPTO_HE50, importe: m50 }))
+      if (m100 > 0) add.push(newLine({ concepto: CONCEPTO_HE100, importe: m100 }))
+      return [...filtradas, ...add]
+    })
+  }
+
+  async function handleDescargarPdf() {
+    const el = reciboRef.current
+    if (!el) return
+    el.classList.add('pdf-snapshot')
+    setPdfBusy(true)
+    try {
+      const base = [
+        'recibo',
+        empleadoNombre || 'empleado',
+        `${MESES[mesIdx]}-${anio}`,
+      ].join('-')
+      await exportElementToPdf(el, base)
+    } finally {
+      el.classList.remove('pdf-snapshot')
+      setPdfBusy(false)
+    }
+  }
+
   const periodoLabel = `${MESES[mesIdx]} ${anio}`
 
   return (
@@ -123,8 +276,16 @@ function App() {
           </p>
         </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="btn"
+            disabled={pdfBusy}
+            onClick={() => void handleDescargarPdf()}
+          >
+            {pdfBusy ? 'Generando PDF…' : 'Descargar PDF'}
+          </button>
           <button type="button" className="btn primary" onClick={() => window.print()}>
-            Imprimir / PDF
+            Imprimir
           </button>
         </div>
       </header>
@@ -184,6 +345,64 @@ function App() {
             </label>
           </div>
 
+          <h2>Escalas de referencia</h2>
+          <div className="convenio-block">
+            <p className="convenio-title">{SUTERH_META.nombre}</p>
+            <p className="convenio-meta">
+              {SUTERH_META.cct}. {SUTERH_META.nota}
+            </p>
+            <label className="field span-2">
+              <span>Encargado permanente (referencia prensa mar. 2026)</span>
+              <select
+                value={suterhEscalaId}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v) aplicarEscalaSuterh(v)
+                  else setSuterhEscalaId('')
+                }}
+              >
+                <option value="">— Elegí categoría para cargar el básico —</option>
+                {SUTERH_ENCARGADO_PERMANENTE.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label} — {formatArs(r.basicoMensual)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="convenio-block uthgra">
+            <p className="convenio-title">{UTHGRA_401_META.nombre}</p>
+            <p className="convenio-meta">
+              {UTHGRA_401_META.anexo}. {UTHGRA_401_META.nota}
+            </p>
+            <label className="field span-2">
+              <span>Categoría comedores públicos CCT 401/05 (referencia)</span>
+              <select
+                value={uthgraEscalaId}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v) aplicarEscalaUthgra(v)
+                  else setUthgraEscalaId('')
+                }}
+              >
+                <option value="">— No aplica a encargados SUTERH —</option>
+                {UTHGRA_CCT401_PUBLICOS.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label} — básico {formatArs(r.basicoMarzo2026)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {uthgraSeleccion ? (
+              <p className="uthgra-snr">
+                SNR referencia marzo 2026:{' '}
+                <strong>{formatArs(uthgraSeleccion.snrMarzo2026)}</strong> (suele
+                abonarse aparte; ver homologación).
+              </p>
+            ) : null}
+          </div>
+
           <h2>Período</h2>
           <div className="field-grid periodo">
             <label className="field">
@@ -211,7 +430,120 @@ function App() {
             </label>
           </div>
 
+          <h2>Antigüedad</h2>
+          <p className="hint">
+            Base de cálculo: importe de la{' '}
+            <strong>primera línea de haberes</strong> (sueldo básico mensual). El
+            porcentaje por año suele ser 2% en el convenio de encargados; ajustalo
+            según categoría y acta vigente.
+          </p>
+          <div className="field-grid">
+            <label className="field span-2">
+              <span>Fecha de ingreso</span>
+              <input
+                type="date"
+                value={fechaIngreso}
+                onChange={(e) => setFechaIngreso(e.target.value)}
+              />
+            </label>
+            <label className="field check span-2">
+              <input
+                type="checkbox"
+                checked={antiguedadDesdeFecha}
+                onChange={(e) => setAntiguedadDesdeFecha(e.target.checked)}
+              />
+              <span>Calcular años de antigüedad desde la fecha de ingreso al cierre del período ({periodoLabel})</span>
+            </label>
+            {!antiguedadDesdeFecha ? (
+              <label className="field">
+                <span>Años de antigüedad (manual)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={80}
+                  step={1}
+                  value={aniosAntiguedadManual}
+                  onChange={(e) => setAniosAntiguedadManual(Number(e.target.value))}
+                />
+              </label>
+            ) : null}
+            <label className="field">
+              <span>% por año sobre el básico</span>
+              <input
+                type="number"
+                min={0}
+                max={50}
+                step={0.25}
+                value={pctAntiguedadAnual}
+                onChange={(e) => setPctAntiguedadAnual(Number(e.target.value))}
+              />
+            </label>
+          </div>
+          <p className="preview-line">
+            Años considerados: <strong>{aniosAntiguedadEfectivos}</strong> — Antigüedad
+            estimada: <strong>{formatArs(preview.ant)}</strong>
+          </p>
+
+          <h2>Horas extras</h2>
+          <p className="hint">
+            Valor hora ordinaria = básico mensual ÷ horas normales del mes (por
+            defecto 200 hs). Extra al 50%: 1,5×; al 100%: 2×.
+          </p>
+          <div className="field-grid">
+            <label className="field">
+              <span>Horas normales del mes (divisor)</span>
+              <input
+                type="number"
+                min={1}
+                max={400}
+                step={1}
+                value={horasNormalesMes}
+                onChange={(e) => setHorasNormalesMes(Number(e.target.value))}
+              />
+            </label>
+            <label className="field">
+              <span>Valor hora (calculado)</span>
+              <input readOnly value={formatArs(preview.valorHora)} />
+            </label>
+            <label className="field">
+              <span>Cantidad de horas extra al 50%</span>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                step={0.5}
+                value={horasExtra50 || ''}
+                onChange={(e) =>
+                  setHorasExtra50(Number.parseFloat(e.target.value) || 0)
+                }
+              />
+            </label>
+            <label className="field">
+              <span>Cantidad de horas extra al 100%</span>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                step={0.5}
+                value={horasExtra100 || ''}
+                onChange={(e) =>
+                  setHorasExtra100(Number.parseFloat(e.target.value) || 0)
+                }
+              />
+            </label>
+          </div>
+          <p className="preview-line">
+            Subtotal HE 50%: <strong>{formatArs(preview.he50)}</strong> — HE 100%:{' '}
+            <strong>{formatArs(preview.he100)}</strong>
+          </p>
+          <button type="button" className="btn primary" onClick={incorporarAntiguedadYExtras}>
+            Incorporar antigüedad y horas extras al recibo
+          </button>
+
           <h2>Haberes</h2>
+          <p className="hint">
+            La primera fila se usa como básico mensual para los cálculos de arriba.
+          </p>
           <MoneyLinesEditor
             rows={haberes}
             onChange={setHaberes}
@@ -257,7 +589,7 @@ function App() {
         </section>
 
         <section className="recibo-wrap" aria-label="Vista de recibo">
-          <article className="recibo">
+          <article className="recibo" ref={reciboRef}>
             <header className="recibo-header">
               <div>
                 <h2 className="recibo-title">Recibo de haberes</h2>
@@ -279,6 +611,12 @@ function App() {
                 <span className="label">CUIL</span>
                 <span>{empleadoCuil || '—'}</span>
               </div>
+              {fechaIngreso ? (
+                <div>
+                  <span className="label">Fecha de ingreso</span>
+                  <span>{fechaIngreso}</span>
+                </div>
+              ) : null}
               <div className="span-row">
                 <span className="label">Categoría</span>
                 <span>{empleadoCategoria || '—'}</span>
@@ -330,7 +668,8 @@ function App() {
               <p className="legal">
                 Documento generado para uso interno del consorcio. Los importes y
                 retenciones deben coincidir con la liquidación oficial y las
-                alícuotas vigentes.
+                alícuotas vigentes. Las escalas y porcentajes del simulador son
+                referenciales.
               </p>
             </footer>
           </article>

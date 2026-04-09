@@ -121,6 +121,76 @@
   line-height: 1.45;
 }
 
+.convenio-block {
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent));
+}
+
+.convenio-block.uthgra {
+  background: color-mix(in srgb, var(--surface) 94%, #6b5b95);
+}
+
+.convenio-title {
+  margin: 0 0 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-heading);
+}
+
+.convenio-meta {
+  margin: 0 0 0.6rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.field.check {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.field.check input {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
+.field.check span {
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.preview-line {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0.5rem 0 0.75rem;
+  text-align: left;
+}
+
+.preview-line strong {
+  color: var(--text-heading);
+}
+
+.uthgra-snr {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: left;
+}
+
+.field input:read-only {
+  opacity: 0.9;
+  cursor: default;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .lines-editor {
   display: flex;
   flex-direction: column;
@@ -224,6 +294,35 @@
   padding: 1.5rem 1.75rem;
   text-align: left;
   box-shadow: var(--shadow);
+}
+
+/* Fondo claro para captura PDF (html2canvas) en tema oscuro */
+.recibo.pdf-snapshot {
+  background: #ffffff !important;
+  color: #1a1d26 !important;
+  border-color: #d8dce6 !important;
+  box-shadow: none !important;
+}
+
+.recibo.pdf-snapshot .recibo-title,
+.recibo.pdf-snapshot .recibo-org strong,
+.recibo.pdf-snapshot .recibo-table .section-row td,
+.recibo.pdf-snapshot .subtotal-row td,
+.recibo.pdf-snapshot .neto strong {
+  color: #0f1117 !important;
+}
+
+.recibo.pdf-snapshot .recibo-periodo,
+.recibo.pdf-snapshot .recibo-org span,
+.recibo.pdf-snapshot .label,
+.recibo.pdf-snapshot .legal,
+.recibo.pdf-snapshot .recibo-table th {
+  color: #5c6370 !important;
+}
+
+.recibo.pdf-snapshot .recibo-table th,
+.recibo.pdf-snapshot .recibo-table td {
+  border-bottom-color: #e2e5ec !important;
 }
 
 .recibo-header {
