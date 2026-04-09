@@ -91,7 +91,7 @@ function matchAdicionalId(label: string): string | null {
 
 function parseSumaFijaFromHtml(html: string): number | null {
   const m = html.match(
-    /Adicional\s+Remuneratorio\s+Mensual[^$]*\$\s*([\d\.]+)/i,
+    /Adicional\s+Remuneratorio\s+Mensual[^$]*\$\s*([\d.]+)/i,
   )
   if (!m) return null
   const digits = m[1].replace(/\./g, '')

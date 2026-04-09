@@ -19,3 +19,12 @@ Generá PDF desde el navegador con **Imprimir / PDF** (impresión a archivo).
 npm run build
 npm run preview
 ```
+
+## Tests y CI
+
+```bash
+npm run test        # una corrida (Vitest)
+npm run test:watch  # modo observación
+```
+
+En GitHub Actions (`.github/workflows/ci.yml`) se ejecutan **lint**, **tests** y **build** en cada push o PR a `master` o `main`.
