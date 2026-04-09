@@ -181,6 +181,24 @@
   text-align: left;
 }
 
+.bono-hint {
+  margin: 0.5rem 0 0.65rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--muted);
+  text-align: left;
+}
+
+.field.bono-importe {
+  max-width: 220px;
+  margin-bottom: 0.25rem;
+}
+
+.row-actions.bono-actions {
+  margin-top: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
 .field input:read-only {
   opacity: 0.9;
   cursor: default;

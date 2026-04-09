@@ -9,6 +9,12 @@ export const SUTERH_META = {
   nota: 'Encargados de edificio y personal de consorcios. Verificar monto vigente en escala oficial.',
 } as const
 
+/**
+ * Suma fija remunerativa referida en acuerdos 2026 (prensa especializada).
+ * En el convenio suele abonarse en proporción a la categoría / modalidad: ajustá el importe según acta homologada.
+ */
+export const SUTERH_SUMA_FIJA_REMUNERATIVA_REF = 120_000
+
 export type SuterhCategoria = 1 | 2 | 3 | 4
 
 export type SuterhModalidad = 'con_vivienda' | 'sin_vivienda'

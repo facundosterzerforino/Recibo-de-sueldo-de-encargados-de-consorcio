@@ -1,6 +1,7 @@
 export {
   SUTERH_ENCARGADO_PERMANENTE,
   SUTERH_META,
+  SUTERH_SUMA_FIJA_REMUNERATIVA_REF,
   type SuterhEscalaRow,
 } from './suterh'
 export {

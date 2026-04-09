@@ -3,6 +3,7 @@ import './App.css'
 import {
   SUTERH_ENCARGADO_PERMANENTE,
   SUTERH_META,
+  SUTERH_SUMA_FIJA_REMUNERATIVA_REF,
   UTHGRA_401_META,
   UTHGRA_CCT401_PUBLICOS,
 } from './convenios'
@@ -19,6 +20,7 @@ const CONCEPTO_BASICO_DEFAULT = 'Sueldo básico / jornal mensual'
 const CONCEPTO_ANTIGUEDAD = 'Antigüedad (convenio)'
 const CONCEPTO_HE50 = 'Horas extras al 50%'
 const CONCEPTO_HE100 = 'Horas extras al 100%'
+const CONCEPTO_SUMA_FIJA_REM = 'Suma fija remunerativa (SUTERH — ref.)'
 
 function newLine(partial?: Partial<MoneyLine>): MoneyLine {
   return {
@@ -83,6 +85,19 @@ function basicoDesdeHaberes(rows: MoneyLine[]): number {
   return rows[0]?.importe ?? 0
 }
 
+/** Inserta o actualiza la línea de suma fija remunerativa justo después del básico (primera fila). */
+function incorporarSumaFijaEnHaberes(
+  rows: MoneyLine[],
+  importe: number,
+): MoneyLine[] {
+  const filtered = rows.filter((r) => r.concepto !== CONCEPTO_SUMA_FIJA_REM)
+  const imp = roundMoney(importe)
+  if (imp <= 0) return filtered
+  const line = newLine({ concepto: CONCEPTO_SUMA_FIJA_REM, importe: imp })
+  if (filtered.length === 0) return [line]
+  return [filtered[0], line, ...filtered.slice(1)]
+}
+
 function App() {
   const reciboRef = useRef<HTMLElement | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
@@ -111,6 +126,10 @@ function App() {
 
   const [suterhEscalaId, setSuterhEscalaId] = useState('')
   const [uthgraEscalaId, setUthgraEscalaId] = useState('')
+  const [importeSumaFijaRem, setImporteSumaFijaRem] = useState(
+    SUTERH_SUMA_FIJA_REMUNERATIVA_REF,
+  )
+  const [bonoConEscalaSuterh, setBonoConEscalaSuterh] = useState(false)
 
   const [haberes, setHaberes] = useState<MoneyLine[]>(defaultHaberes)
   const [descuentos, setDescuentos] = useState<MoneyLine[]>(defaultDescuentos)
@@ -207,9 +226,15 @@ function App() {
       const row = SUTERH_ENCARGADO_PERMANENTE.find((r) => r.id === id)
       if (!row) return
       setEmpleadoCategoria(row.label)
-      setHaberes((h) => ensureFirstBasico(h, row.basicoMensual))
+      setHaberes((h) => {
+        let next = ensureFirstBasico(h, row.basicoMensual)
+        if (bonoConEscalaSuterh && importeSumaFijaRem > 0) {
+          next = incorporarSumaFijaEnHaberes(next, importeSumaFijaRem)
+        }
+        return next
+      })
     },
-    [],
+    [bonoConEscalaSuterh, importeSumaFijaRem],
   )
 
   const aplicarEscalaUthgra = useCallback((id: string) => {
@@ -218,8 +243,15 @@ function App() {
     const row = UTHGRA_CCT401_PUBLICOS.find((r) => r.id === id)
     if (!row) return
     setEmpleadoCategoria(`${row.label} (${UTHGRA_401_META.nombre})`)
-    setHaberes((h) => ensureFirstBasico(h, row.basicoMarzo2026))
+    setHaberes((h) => {
+      const sinBonoSuterh = h.filter((r) => r.concepto !== CONCEPTO_SUMA_FIJA_REM)
+      return ensureFirstBasico(sinBonoSuterh, row.basicoMarzo2026)
+    })
   }, [])
+
+  function aplicarSumaFijaRemunerativaAlRecibo() {
+    setHaberes((h) => incorporarSumaFijaEnHaberes(h, importeSumaFijaRem))
+  }
 
   function incorporarAntiguedadYExtras() {
     const base = basicoMensual
@@ -368,6 +400,53 @@ function App() {
                   </option>
                 ))}
               </select>
+            </label>
+            <p className="bono-hint">
+              Suma fija remunerativa (referencia inicio 2026:{' '}
+              {formatArs(SUTERH_SUMA_FIJA_REMUNERATIVA_REF)}). En el convenio puede
+              abonarse en forma proporcional según categoría: editá el importe y
+              cargalo al recibo.
+            </p>
+            <label className="field bono-importe">
+              <span>Importe suma fija remunerativa</span>
+              <input
+                type="number"
+                min={0}
+                step={1000}
+                value={importeSumaFijaRem || ''}
+                onChange={(e) =>
+                  setImporteSumaFijaRem(Number.parseFloat(e.target.value) || 0)
+                }
+              />
+            </label>
+            <div className="row-actions bono-actions">
+              <button
+                type="button"
+                className="btn subtle"
+                onClick={() =>
+                  setImporteSumaFijaRem(SUTERH_SUMA_FIJA_REMUNERATIVA_REF)
+                }
+              >
+                Usar referencia {formatArs(SUTERH_SUMA_FIJA_REMUNERATIVA_REF)}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={aplicarSumaFijaRemunerativaAlRecibo}
+              >
+                Agregar o actualizar en haberes
+              </button>
+            </div>
+            <label className="field check span-2">
+              <input
+                type="checkbox"
+                checked={bonoConEscalaSuterh}
+                onChange={(e) => setBonoConEscalaSuterh(e.target.checked)}
+              />
+              <span>
+                Incluir automáticamente al elegir una escala SUTERH (mismo importe
+                de arriba)
+              </span>
             </label>
           </div>
 
