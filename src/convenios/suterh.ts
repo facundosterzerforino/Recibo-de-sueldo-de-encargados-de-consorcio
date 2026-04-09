@@ -86,3 +86,107 @@ export const SUTERH_ENCARGADO_PERMANENTE: SuterhEscalaRow[] = [
     basicoMensual: 970_178,
   },
 ]
+
+/** Planilla oficial en el sitio de FATERYH (actualizar valores si cambia el mes de referencia). */
+export const SUTERH_PLANILLA_FATERYH_URL =
+  'https://fateryh.org.ar/planilla-salarial-vigente/' as const
+
+export type SuterhAdicionalPlanilla =
+  | {
+      id: string
+      kind: 'fijo'
+      concepto: string
+      importe: number
+    }
+  | {
+      id: string
+      kind: 'pct_basico'
+      concepto: string
+      porcentaje: number
+    }
+  | {
+      id: string
+      kind: 'por_unidad'
+      concepto: string
+      importePorUnidad: number
+    }
+
+/**
+ * Adicionales «para cualquiera de las categorías» y montos fijos de la planilla
+ * publicada (marzo 2026). Contrastar siempre con la homologación vigente.
+ */
+export const SUTERH_ADICIONALES_PLANILLA: SuterhAdicionalPlanilla[] = [
+  {
+    id: 'adic-retiro-residuos-unidad',
+    kind: 'por_unidad',
+    concepto: 'Retiro de residuos por unidad (vivienda u oficina)',
+    importePorUnidad: 1786.9,
+  },
+  {
+    id: 'adic-clasif-residuos',
+    kind: 'fijo',
+    concepto: 'Clasificación de residuos (Resol. 2013-243 SSRT-GCABA)',
+    importe: 30777.3,
+  },
+  {
+    id: 'adic-valor-vivienda',
+    kind: 'fijo',
+    concepto: 'Valor vivienda',
+    importe: 6564.6,
+  },
+  {
+    id: 'adic-plus-ant-106',
+    kind: 'fijo',
+    concepto:
+      'Plus antigüedad (Resol. 106/09 — inc. art. 7 y 8, ref. 1% por año)',
+    importe: 9701.8,
+  },
+  {
+    id: 'adic-plus-ant-art11',
+    kind: 'fijo',
+    concepto: 'Plus antigüedad (art. 11 convenio — ref. 2% por año)',
+    importe: 19403.6,
+  },
+  {
+    id: 'adic-limpieza-cocheras',
+    kind: 'fijo',
+    concepto: 'Plus limpieza de cocheras',
+    importe: 24385,
+  },
+  {
+    id: 'adic-mov-coches',
+    kind: 'fijo',
+    concepto: 'Plus movimiento de coches (hasta 20 unidades)',
+    importe: 36104.6,
+  },
+  {
+    id: 'adic-jardin',
+    kind: 'fijo',
+    concepto: 'Plus jardín',
+    importe: 24385,
+  },
+  {
+    id: 'adic-zona-desfavorable',
+    kind: 'pct_basico',
+    concepto: 'Plus zona desfavorable',
+    porcentaje: 50,
+  },
+  {
+    id: 'adic-titulo-encargado-integral',
+    kind: 'pct_basico',
+    concepto: 'Título encargado integral de edificio',
+    porcentaje: 10,
+  },
+  {
+    id: 'adic-piletas',
+    kind: 'fijo',
+    concepto: 'Plus limpieza de piletas y mantenimiento del agua',
+    importe: 41021.6,
+  },
+  {
+    id: 'adic-viaticos',
+    kind: 'fijo',
+    concepto: 'Adicional viáticos',
+    importe: 67912.5,
+  },
+]

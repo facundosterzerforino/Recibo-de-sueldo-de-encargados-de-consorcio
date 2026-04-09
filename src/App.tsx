@@ -1,20 +1,60 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
+  type AgendaState,
+  type StoredEncargado,
+  findConsorcio,
+  findEncargado,
+  loadAgenda,
+  persistAgenda,
+} from './agendaStorage'
+import {
+  SUTERH_ADICIONALES_PLANILLA,
   SUTERH_ENCARGADO_PERMANENTE,
   SUTERH_META,
+  SUTERH_PLANILLA_FATERYH_URL,
   SUTERH_SUMA_FIJA_REMUNERATIVA_REF,
   UTHGRA_401_META,
   UTHGRA_CCT401_PUBLICOS,
+  type SuterhAdicionalPlanilla,
 } from './convenios'
 import { formatArs, parseArsInput, roundMoney } from './money'
+import {
+  buildPlanillaCacheFromParsed,
+  clearPlanillaCache,
+  loadPlanillaCache,
+  mergeAdicionalesPlanilla,
+  resolvePlanillaFetchUrl,
+  savePlanillaCache,
+  type PlanillaCacheV1,
+} from './planillaFateryhCache'
+import { parsePlanillaFateryhHtml } from './planillaFateryhParser'
+import { sonPesosEnLetras } from './pesosEnLetras'
 import { exportElementToPdf } from './pdfExport'
 
 type MoneyLine = {
   id: string
   concepto: string
   importe: number
+  /** Unidades, días o % que se muestran en el recibo LCT (columna «Un.»). */
+  unidad?: string
 }
+
+const LCT_CONTRIB_IZQ = [
+  'SIPA (Ley 24.241)',
+  'INSSJP — PAMI (Ley 19.032)',
+  'Asignaciones familiares',
+  'FNE / cese laboral (si corresponde)',
+  'ART — riesgos del trabajo',
+] as const
+
+const LCT_CONTRIB_DER = [
+  'Obra social — aporte empleador',
+  'Contribución adicional OS (si corresponde)',
+  'Aportes sindicales empleador (si corresponde)',
+  'Otros aportes / tasas',
+  '—',
+] as const
 
 const CONCEPTO_BASICO_DEFAULT = 'Sueldo básico / jornal mensual'
 const CONCEPTO_ANTIGUEDAD = 'Antigüedad (convenio)'
@@ -27,6 +67,7 @@ function newLine(partial?: Partial<MoneyLine>): MoneyLine {
     id: crypto.randomUUID(),
     concepto: partial?.concepto ?? '',
     importe: partial?.importe ?? 0,
+    unidad: partial?.unidad ?? '',
   }
 }
 
@@ -98,9 +139,72 @@ function incorporarSumaFijaEnHaberes(
   return [filtered[0], line, ...filtered.slice(1)]
 }
 
+function cloneMoneyLines(rows: MoneyLine[]): MoneyLine[] {
+  return rows.map((r) => ({ ...r }))
+}
+
+function unidadHaberEnRecibo(l: MoneyLine, index: number): string {
+  const u = l.unidad?.trim()
+  if (u) return u
+  if (index === 0) return '30'
+  return '—'
+}
+
+function unidadDescuentoEnRecibo(l: MoneyLine): string {
+  const u = l.unidad?.trim()
+  return u || '—'
+}
+
+function soloDigitosCuil(s: string): string {
+  return s.replace(/\D/g, '')
+}
+
+function cuilPareceCompleto(d: string): boolean {
+  return d.length >= 10
+}
+
+/**
+ * Si el combo sigue en un encargado guardado pero el formulario ya muestra otra persona
+ * (nombre distinto, o CUIL distinto cuando ambos están completos), generamos un id nuevo
+ * y se hace push en lugar de pisar la ficha anterior.
+ */
+function resolverIdEncargadoAlGuardar(
+  selectedEncargadoId: string | null,
+  existing: StoredEncargado | undefined,
+  nombreForm: string,
+  cuilForm: string,
+): string {
+  if (!selectedEncargadoId || !existing) return crypto.randomUUID()
+
+  const nF = nombreForm.trim().toLowerCase()
+  const nE = existing.nombre.trim().toLowerCase()
+  const cuilF = soloDigitosCuil(cuilForm)
+  const cuilE = soloDigitosCuil(existing.cuil)
+
+  if (nF === nE) return selectedEncargadoId
+
+  if (
+    cuilPareceCompleto(cuilF) &&
+    cuilPareceCompleto(cuilE) &&
+    cuilF === cuilE
+  ) {
+    return selectedEncargadoId
+  }
+
+  return crypto.randomUUID()
+}
+
 function App() {
   const reciboRef = useRef<HTMLElement | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
+
+  const [agenda, setAgenda] = useState<AgendaState>(() => loadAgenda())
+  const [selectedConsorcioId, setSelectedConsorcioId] = useState<string | null>(
+    null,
+  )
+  const [selectedEncargadoId, setSelectedEncargadoId] = useState<string | null>(
+    null,
+  )
 
   const [consorcioNombre, setConsorcioNombre] = useState('')
   const [consorcioCuit, setConsorcioCuit] = useState('')
@@ -111,6 +215,19 @@ function App() {
   const [empleadoCategoria, setEmpleadoCategoria] = useState(
     'Encargado de edificio / consorcio',
   )
+
+  const [reciboLegajo, setReciboLegajo] = useState('')
+  const [reciboObraSocial, setReciboObraSocial] = useState('')
+  const [reciboTipoContrato, setReciboTipoContrato] = useState(
+    'Por tiempo indeterminado',
+  )
+  const [reciboTareaDesempeniada, setReciboTareaDesempeniada] = useState('')
+  const [reciboAntiguedadReconocida, setReciboAntiguedadReconocida] =
+    useState('')
+  const [reciboUltimoDeposito, setReciboUltimoDeposito] = useState('')
+  const [reciboBanco, setReciboBanco] = useState('')
+  const [reciboCbu, setReciboCbu] = useState('')
+  const [reciboLugarPago, setReciboLugarPago] = useState('')
 
   const now = new Date()
   const [mesIdx, setMesIdx] = useState(now.getMonth())
@@ -130,9 +247,303 @@ function App() {
     SUTERH_SUMA_FIJA_REMUNERATIVA_REF,
   )
   const [bonoConEscalaSuterh, setBonoConEscalaSuterh] = useState(false)
+  const [unidadesRetiroResiduos, setUnidadesRetiroResiduos] = useState(1)
+  const [planillaCache, setPlanillaCache] = useState<PlanillaCacheV1 | null>(
+    () => loadPlanillaCache(),
+  )
+  const [planillaBusy, setPlanillaBusy] = useState(false)
+  const [planillaError, setPlanillaError] = useState<string | null>(null)
+  const [planillaPaste, setPlanillaPaste] = useState('')
 
   const [haberes, setHaberes] = useState<MoneyLine[]>(defaultHaberes)
   const [descuentos, setDescuentos] = useState<MoneyLine[]>(defaultDescuentos)
+
+  const resetEncargadoForm = useCallback(() => {
+    setEmpleadoNombre('')
+    setEmpleadoCuil('')
+    setEmpleadoCategoria('Encargado de edificio / consorcio')
+    setFechaIngreso('')
+    setAntiguedadDesdeFecha(true)
+    setAniosAntiguedadManual(0)
+    setPctAntiguedadAnual(2)
+    setHorasNormalesMes(200)
+    setHorasExtra50(0)
+    setHorasExtra100(0)
+    setSuterhEscalaId('')
+    setUthgraEscalaId('')
+    setImporteSumaFijaRem(SUTERH_SUMA_FIJA_REMUNERATIVA_REF)
+    setBonoConEscalaSuterh(false)
+    setReciboLegajo('')
+    setReciboObraSocial('')
+    setReciboTipoContrato('Por tiempo indeterminado')
+    setReciboTareaDesempeniada('')
+    setReciboAntiguedadReconocida('')
+    setReciboUltimoDeposito('')
+    setReciboBanco('')
+    setReciboCbu('')
+    setReciboLugarPago('')
+    setHaberes(cloneMoneyLines(defaultHaberes))
+    setDescuentos(cloneMoneyLines(defaultDescuentos))
+  }, [])
+
+  const applyEncargadoSnapshot = useCallback((e: StoredEncargado) => {
+    setEmpleadoNombre(e.nombre)
+    setEmpleadoCuil(e.cuil)
+    setEmpleadoCategoria(e.categoria)
+    setFechaIngreso(e.fechaIngreso)
+    setAntiguedadDesdeFecha(e.antiguedadDesdeFecha)
+    setAniosAntiguedadManual(e.aniosAntiguedadManual)
+    setPctAntiguedadAnual(e.pctAntiguedadAnual)
+    setHorasNormalesMes(e.horasNormalesMes)
+    setHorasExtra50(e.horasExtra50)
+    setHorasExtra100(e.horasExtra100)
+    setSuterhEscalaId(e.suterhEscalaId)
+    setUthgraEscalaId(e.uthgraEscalaId)
+    setImporteSumaFijaRem(e.importeSumaFijaRem)
+    setBonoConEscalaSuterh(e.bonoConEscalaSuterh)
+    setReciboLegajo(e.reciboLegajo ?? '')
+    setReciboObraSocial(e.reciboObraSocial ?? '')
+    setReciboTipoContrato(
+      e.reciboTipoContrato?.trim()
+        ? e.reciboTipoContrato
+        : 'Por tiempo indeterminado',
+    )
+    setReciboTareaDesempeniada(e.reciboTareaDesempeniada ?? '')
+    setReciboAntiguedadReconocida(e.reciboAntiguedadReconocida ?? '')
+    setReciboUltimoDeposito(e.reciboUltimoDeposito ?? '')
+    setReciboBanco(e.reciboBanco ?? '')
+    setReciboCbu(e.reciboCbu ?? '')
+    setReciboLugarPago(e.reciboLugarPago ?? '')
+    setHaberes(
+      e.haberes?.length
+        ? cloneMoneyLines(e.haberes)
+        : cloneMoneyLines(defaultHaberes),
+    )
+    setDescuentos(
+      e.descuentos?.length
+        ? cloneMoneyLines(e.descuentos)
+        : cloneMoneyLines(defaultDescuentos),
+    )
+  }, [])
+
+  function guardarEnAgenda() {
+    const nCons = consorcioNombre.trim()
+    const nEmp = empleadoNombre.trim()
+    if (!nCons) {
+      window.alert('Completá el nombre del consorcio para guardarlo.')
+      return
+    }
+    if (!nEmp) {
+      window.alert('Completá el nombre del encargado para guardarlo.')
+      return
+    }
+
+    const consorcioAgenda = selectedConsorcioId
+      ? findConsorcio(agenda, selectedConsorcioId)
+      : undefined
+    const encargadoPrevio =
+      consorcioAgenda && selectedEncargadoId
+        ? findEncargado(consorcioAgenda, selectedEncargadoId)
+        : undefined
+    const encId = resolverIdEncargadoAlGuardar(
+      selectedEncargadoId,
+      encargadoPrevio,
+      empleadoNombre,
+      empleadoCuil,
+    )
+
+    const enc: StoredEncargado = {
+      id: encId,
+      nombre: empleadoNombre,
+      cuil: empleadoCuil,
+      categoria: empleadoCategoria,
+      fechaIngreso,
+      antiguedadDesdeFecha,
+      aniosAntiguedadManual,
+      pctAntiguedadAnual,
+      horasNormalesMes,
+      horasExtra50,
+      horasExtra100,
+      suterhEscalaId,
+      uthgraEscalaId,
+      importeSumaFijaRem,
+      bonoConEscalaSuterh,
+      reciboLegajo,
+      reciboObraSocial,
+      reciboTipoContrato,
+      reciboTareaDesempeniada,
+      reciboAntiguedadReconocida,
+      reciboUltimoDeposito,
+      reciboBanco,
+      reciboCbu,
+      reciboLugarPago,
+      haberes: haberes.map(({ id, concepto, importe, unidad }) => ({
+        id,
+        concepto,
+        importe,
+        ...(unidad?.trim() ? { unidad: unidad.trim() } : {}),
+      })),
+      descuentos: descuentos.map(({ id, concepto, importe, unidad }) => ({
+        id,
+        concepto,
+        importe,
+        ...(unidad?.trim() ? { unidad: unidad.trim() } : {}),
+      })),
+    }
+
+    const consorcios = [...agenda.consorcios]
+    let outConsorcioId: string
+
+    if (selectedConsorcioId && findConsorcio(agenda, selectedConsorcioId)) {
+      const i = consorcios.findIndex((c) => c.id === selectedConsorcioId)
+      const c = consorcios[i]
+      const encargados = [...c.encargados]
+      const ei = encargados.findIndex((e) => e.id === encId)
+      if (ei >= 0) encargados[ei] = enc
+      else encargados.push(enc)
+      consorcios[i] = {
+        ...c,
+        nombre: consorcioNombre,
+        cuit: consorcioCuit,
+        domicilio: consorcioDomicilio,
+        encargados,
+      }
+      outConsorcioId = c.id
+    } else {
+      outConsorcioId = crypto.randomUUID()
+      consorcios.push({
+        id: outConsorcioId,
+        nombre: consorcioNombre,
+        cuit: consorcioCuit,
+        domicilio: consorcioDomicilio,
+        encargados: [enc],
+      })
+    }
+
+    const next: AgendaState = { version: 1, consorcios }
+    persistAgenda(next)
+    setAgenda(next)
+    setSelectedConsorcioId(outConsorcioId)
+    setSelectedEncargadoId(encId)
+  }
+
+  function eliminarConsorcioGuardado() {
+    if (!selectedConsorcioId) {
+      window.alert('Elegí un consorcio guardado para eliminarlo.')
+      return
+    }
+    if (
+      !window.confirm(
+        '¿Eliminar este consorcio y todos los encargados guardados dentro?',
+      )
+    ) {
+      return
+    }
+    const consorcios = agenda.consorcios.filter(
+      (c) => c.id !== selectedConsorcioId,
+    )
+    const next: AgendaState = { version: 1, consorcios }
+    persistAgenda(next)
+    setAgenda(next)
+    setSelectedConsorcioId(null)
+    setSelectedEncargadoId(null)
+    setConsorcioNombre('')
+    setConsorcioCuit('')
+    setConsorcioDomicilio('')
+    resetEncargadoForm()
+  }
+
+  function eliminarEncargadoGuardado() {
+    if (!selectedConsorcioId || !selectedEncargadoId) {
+      window.alert('Elegí un encargado guardado para eliminarlo.')
+      return
+    }
+    if (!window.confirm('¿Eliminar este encargado de la agenda?')) return
+    const consorcios = agenda.consorcios.map((c) => {
+      if (c.id !== selectedConsorcioId) return c
+      return {
+        ...c,
+        encargados: c.encargados.filter((e) => e.id !== selectedEncargadoId),
+      }
+    })
+    const next: AgendaState = { version: 1, consorcios }
+    persistAgenda(next)
+    setAgenda(next)
+    const c = findConsorcio(next, selectedConsorcioId)
+    if (c && c.encargados.length > 0) {
+      const e0 = c.encargados[0]
+      setSelectedEncargadoId(e0.id)
+      applyEncargadoSnapshot(e0)
+    } else {
+      setSelectedEncargadoId(null)
+      resetEncargadoForm()
+    }
+  }
+
+  function onConsorcioAgendaChange(id: string) {
+    if (!id) {
+      setSelectedConsorcioId(null)
+      setSelectedEncargadoId(null)
+      return
+    }
+    const c = findConsorcio(agenda, id)
+    if (!c) return
+    setSelectedConsorcioId(c.id)
+    setConsorcioNombre(c.nombre)
+    setConsorcioCuit(c.cuit)
+    setConsorcioDomicilio(c.domicilio)
+    if (c.encargados.length > 0) {
+      const e0 = c.encargados[0]
+      setSelectedEncargadoId(e0.id)
+      applyEncargadoSnapshot(e0)
+    } else {
+      setSelectedEncargadoId(null)
+      resetEncargadoForm()
+    }
+  }
+
+  function onEncargadoAgendaChange(id: string) {
+    if (!selectedConsorcioId) return
+    const c = findConsorcio(agenda, selectedConsorcioId)
+    if (!c) return
+    if (!id) {
+      setSelectedEncargadoId(null)
+      resetEncargadoForm()
+      return
+    }
+    const e = findEncargado(c, id)
+    if (!e) return
+    setSelectedEncargadoId(e.id)
+    applyEncargadoSnapshot(e)
+  }
+
+  const consorcioSeleccionado = selectedConsorcioId
+    ? findConsorcio(agenda, selectedConsorcioId)
+    : undefined
+
+  const consorciosOrdenados = useMemo(
+    () =>
+      [...agenda.consorcios].sort((a, b) =>
+        a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' }),
+      ),
+    [agenda.consorcios],
+  )
+
+  const encargadosOrdenados = useMemo(() => {
+    if (!consorcioSeleccionado) return []
+    return [...consorcioSeleccionado.encargados].sort((a, b) =>
+      a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' }),
+    )
+  }, [consorcioSeleccionado])
+
+  const adicionalesEfectivos = useMemo(
+    () =>
+      mergeAdicionalesPlanilla(
+        SUTERH_ADICIONALES_PLANILLA,
+        planillaCache?.overrides,
+      ),
+    [planillaCache],
+  )
 
   const totalHaberes = useMemo(
     () => roundMoney(haberes.reduce((s, l) => s + l.importe, 0)),
@@ -176,6 +587,108 @@ function App() {
     () => UTHGRA_CCT401_PUBLICOS.find((r) => r.id === uthgraEscalaId),
     [uthgraEscalaId],
   )
+
+  function agregarLineaAdicionalPlanilla(def: SuterhAdicionalPlanilla) {
+    const sufijo = planillaCache
+      ? ` — ref. planilla FATERYH (${new Date(planillaCache.fetchedAt).toLocaleDateString('es-AR')})`
+      : ' — ref. planilla FATERYH (valores del programa)'
+    if (def.kind === 'fijo') {
+      setHaberes((rows) => [
+        ...rows,
+        newLine({
+          concepto: `${def.concepto}${sufijo}`,
+          importe: roundMoney(def.importe),
+        }),
+      ])
+      return
+    }
+    if (def.kind === 'pct_basico') {
+      const b = basicoMensual
+      if (b <= 0) {
+        window.alert(
+          'Cargá primero el sueldo básico en la primera línea de haberes (o elegí una escala SUTERH).',
+        )
+        return
+      }
+      const imp = roundMoney((b * def.porcentaje) / 100)
+      setHaberes((rows) => [
+        ...rows,
+        newLine({
+          concepto: `${def.concepto} (${def.porcentaje}% s/ básico)${sufijo}`,
+          importe: imp,
+        }),
+      ])
+      return
+    }
+    const u = Math.max(1, Math.floor(unidadesRetiroResiduos) || 1)
+    const imp = roundMoney(def.importePorUnidad * u)
+    const concepto =
+      u === 1
+        ? `${def.concepto}${sufijo}`
+        : `${def.concepto} (× ${u} u.)${sufijo}`
+    setHaberes((rows) => [...rows, newLine({ concepto, importe: imp })])
+  }
+
+  async function actualizarPlanillaDesdeFateryh() {
+    setPlanillaBusy(true)
+    setPlanillaError(null)
+    try {
+      const url = resolvePlanillaFetchUrl()
+      const res = await fetch(url, { credentials: 'omit', cache: 'no-store' })
+      if (!res.ok) throw new Error(`Respuesta HTTP ${res.status}`)
+      const html = await res.text()
+      const parsed = parsePlanillaFateryhHtml(html)
+      if (Object.keys(parsed.overrides).length === 0) {
+        throw new Error(
+          'No se encontró la tabla de adicionales. Si la página cambió, usá «Pegar HTML».',
+        )
+      }
+      const cache = buildPlanillaCacheFromParsed(parsed)
+      savePlanillaCache(cache)
+      setPlanillaCache(cache)
+    } catch (e) {
+      const base = e instanceof Error ? e.message : 'No se pudo descargar la planilla'
+      const corsHint =
+        import.meta.env.PROD && !import.meta.env.VITE_FATERYH_PLANILLA_PROXY
+          ? ' En sitio publicado suele bloquear el navegador (CORS): usá «Pegar HTML» o un proxy (variable VITE_FATERYH_PLANILLA_PROXY).'
+          : ''
+      setPlanillaError(base + corsHint)
+    } finally {
+      setPlanillaBusy(false)
+    }
+  }
+
+  function importarPlanillaDesdePegado() {
+    const html = planillaPaste.trim()
+    if (!html) {
+      window.alert('Pegá primero el código de la página de la planilla (Ctrl+U o «Ver código fuente»).')
+      return
+    }
+    setPlanillaError(null)
+    const parsed = parsePlanillaFateryhHtml(html)
+    if (Object.keys(parsed.overrides).length === 0) {
+      window.alert(
+        'No se encontró la tabla de adicionales en el HTML pegado.',
+      )
+      return
+    }
+    const cache = buildPlanillaCacheFromParsed(parsed)
+    savePlanillaCache(cache)
+    setPlanillaCache(cache)
+    setPlanillaPaste('')
+  }
+
+  function restaurarValoresEmpaquetadosAdicionales() {
+    clearPlanillaCache()
+    setPlanillaCache(null)
+    setPlanillaError(null)
+  }
+
+  function aplicarSumaFijaDetectada() {
+    const v = planillaCache?.sumaFijaRemuneratoriaRef
+    if (v == null || v <= 0) return
+    setImporteSumaFijaRem(v)
+  }
 
   function updateHaber(id: string, patch: Partial<MoneyLine>) {
     setHaberes((rows) =>
@@ -297,6 +810,12 @@ function App() {
   }
 
   const periodoLabel = `${MESES[mesIdx]} ${anio}`
+  const periodoPagoCorto = `${String(mesIdx + 1).padStart(2, '0')}/${anio}`
+  const cctRecibo =
+    uthgraEscalaId && !suterhEscalaId
+      ? `${UTHGRA_401_META.nombre} (referencia)`
+      : SUTERH_META.cct
+  const totalNoRemunerativo = 0
 
   return (
     <div className="app">
@@ -324,6 +843,84 @@ function App() {
 
       <div className="layout">
         <section className="panel editor no-print" aria-label="Datos de liquidación">
+          <h2>Agenda guardada</h2>
+          <p className="hint">
+            Los datos se guardan en este navegador (local). Elegí un consorcio y un
+            encargado para cargar todo de una vez, o completá el formulario y pulsá
+            guardar para actualizar la ficha. Para dar de alta otro encargado en el
+            mismo consorcio usá «Agregar otro encargado» o cambiá nombre/CUIL
+            respecto de la ficha cargada: se guardará como persona nueva sin pisar la
+            anterior.
+          </p>
+          <div className="field-grid agenda-picker">
+            <label className="field span-2">
+              <span>Consorcio</span>
+              <select
+                value={selectedConsorcioId ?? ''}
+                onChange={(e) => onConsorcioAgendaChange(e.target.value)}
+              >
+                <option value="">— Sin seleccionar (entrada libre) —</option>
+                {consorciosOrdenados.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nombre || '(sin nombre)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field span-2">
+              <span>Encargado</span>
+              <select
+                value={selectedEncargadoId ?? ''}
+                disabled={!selectedConsorcioId}
+                onChange={(e) => onEncargadoAgendaChange(e.target.value)}
+              >
+                <option value="">
+                  {selectedConsorcioId
+                    ? '— Nuevo encargado en este consorcio —'
+                    : '— Elegí un consorcio primero —'}
+                </option>
+                {encargadosOrdenados.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.nombre || '(sin nombre)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="row-actions agenda-actions">
+            <button type="button" className="btn primary" onClick={guardarEnAgenda}>
+              Guardar consorcio y encargado
+            </button>
+            <button
+              type="button"
+              className="btn subtle"
+              disabled={!selectedConsorcioId}
+              onClick={() => {
+                setSelectedEncargadoId(null)
+                resetEncargadoForm()
+              }}
+              title="Limpia el encargado y el próximo guardado agrega una ficha nueva en este consorcio"
+            >
+              Agregar otro encargado
+            </button>
+            <button
+              type="button"
+              className="btn subtle"
+              disabled={!selectedEncargadoId}
+              onClick={eliminarEncargadoGuardado}
+            >
+              Quitar encargado
+            </button>
+            <button
+              type="button"
+              className="btn subtle danger"
+              disabled={!selectedConsorcioId}
+              onClick={eliminarConsorcioGuardado}
+            >
+              Quitar consorcio
+            </button>
+          </div>
+
           <h2>Datos del consorcio</h2>
           <div className="field-grid">
             <label className="field">
@@ -373,6 +970,85 @@ function App() {
               <input
                 value={empleadoCategoria}
                 onChange={(e) => setEmpleadoCategoria(e.target.value)}
+              />
+            </label>
+          </div>
+
+          <h2>Recibo Ley 20.744 (modelo art. 140 LCT)</h2>
+          <p className="hint">
+            Completá lo que figure en la liquidación oficial. En «Un.» (haberes y
+            descuentos) podés cargar días, porcentajes, etc.; si el primer concepto
+            queda vacío, el recibo muestra 30 como jornales del mes.
+          </p>
+          <div className="field-grid">
+            <label className="field">
+              <span>Legajo Nº</span>
+              <input
+                value={reciboLegajo}
+                onChange={(e) => setReciboLegajo(e.target.value)}
+                placeholder="Opcional"
+              />
+            </label>
+            <label className="field">
+              <span>Obra social</span>
+              <input
+                value={reciboObraSocial}
+                onChange={(e) => setReciboObraSocial(e.target.value)}
+                placeholder="Ej. OSECAC"
+              />
+            </label>
+            <label className="field span-2">
+              <span>Tipo de contrato</span>
+              <input
+                value={reciboTipoContrato}
+                onChange={(e) => setReciboTipoContrato(e.target.value)}
+              />
+            </label>
+            <label className="field span-2">
+              <span>Tarea desempeñada</span>
+              <input
+                value={reciboTareaDesempeniada}
+                onChange={(e) => setReciboTareaDesempeniada(e.target.value)}
+                placeholder="Ej. Encargado de edificio"
+              />
+            </label>
+            <label className="field">
+              <span>Antigüedad reconocida (fecha)</span>
+              <input
+                type="date"
+                value={reciboAntiguedadReconocida}
+                onChange={(e) => setReciboAntiguedadReconocida(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Último depósito (fecha)</span>
+              <input
+                type="date"
+                value={reciboUltimoDeposito}
+                onChange={(e) => setReciboUltimoDeposito(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Banco / acreditación</span>
+              <input
+                value={reciboBanco}
+                onChange={(e) => setReciboBanco(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>CBU</span>
+              <input
+                value={reciboCbu}
+                onChange={(e) => setReciboCbu(e.target.value)}
+                placeholder="22 dígitos"
+              />
+            </label>
+            <label className="field span-2">
+              <span>Lugar de pago (pie de recibo)</span>
+              <input
+                value={reciboLugarPago}
+                onChange={(e) => setReciboLugarPago(e.target.value)}
+                placeholder="Ciudad — local / consorcio"
               />
             </label>
           </div>
@@ -448,6 +1124,160 @@ function App() {
                 de arriba)
               </span>
             </label>
+
+            <div className="adicionales-planilla">
+              <p className="adicionales-planilla-title">
+                Adicionales (planilla vigente)
+              </p>
+              <p className="bono-hint">
+                Referencia según la{' '}
+                <a
+                  href={SUTERH_PLANILLA_FATERYH_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  planilla salarial FATERYH
+                </a>
+                . Los importes pueden{' '}
+                <strong>actualizarse desde la web</strong> y quedan guardados en
+                este navegador. Con <code>npm run dev</code> la descarga usa un
+                proxy local; en la versión publicada, si falla por CORS, pegá el
+                HTML de la página abajo. El adicional global de la planilla lo
+                podés aplicar al campo «suma fija remunerativa» si lo detectamos.
+                Los ítems porcentuales usan el básico de la primera línea de
+                haberes.
+              </p>
+              <div className="planilla-toolbar row-actions">
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={planillaBusy}
+                  onClick={() => void actualizarPlanillaDesdeFateryh()}
+                >
+                  {planillaBusy ? 'Descargando…' : 'Actualizar desde FATERYH'}
+                </button>
+                <button
+                  type="button"
+                  className="btn subtle"
+                  disabled={
+                    planillaCache?.sumaFijaRemuneratoriaRef == null ||
+                    planillaCache.sumaFijaRemuneratoriaRef <= 0
+                  }
+                  onClick={aplicarSumaFijaDetectada}
+                  title="Copia al campo «Importe suma fija remunerativa» el monto leído en la planilla"
+                >
+                  Aplicar adicional global detectado (
+                  {planillaCache?.sumaFijaRemuneratoriaRef != null &&
+                  planillaCache.sumaFijaRemuneratoriaRef > 0
+                    ? formatArs(planillaCache.sumaFijaRemuneratoriaRef)
+                    : '—'}
+                  )
+                </button>
+                <button
+                  type="button"
+                  className="btn subtle"
+                  onClick={restaurarValoresEmpaquetadosAdicionales}
+                  disabled={!planillaCache}
+                >
+                  Usar solo valores del programa
+                </button>
+              </div>
+              {planillaCache ? (
+                <p className="planilla-cache-meta">
+                  Valores locales: actualizado{' '}
+                  {new Date(planillaCache.fetchedAt).toLocaleString('es-AR')}
+                </p>
+              ) : (
+                <p className="planilla-cache-meta planilla-cache-meta--default">
+                  Sin datos descargados: se muestran los valores incluidos en el
+                  programa.
+                </p>
+              )}
+              {planillaError ? (
+                <p className="planilla-error" role="alert">
+                  {planillaError}
+                </p>
+              ) : null}
+              <details className="planilla-paste-fallback">
+                <summary>Importar pegando el HTML de la página</summary>
+                <p className="bono-hint">
+                  En la planilla FATERYH: menú del navegador → «Ver código fuente de
+                  la página» o guardar la página como HTML, abrila en un editor,
+                  copiá todo y pegalo acá.
+                </p>
+                <textarea
+                  className="planilla-paste-textarea"
+                  rows={5}
+                  value={planillaPaste}
+                  onChange={(e) => setPlanillaPaste(e.target.value)}
+                  placeholder="Pegá aquí el HTML completo…"
+                />
+                <button
+                  type="button"
+                  className="btn subtle"
+                  onClick={importarPlanillaDesdePegado}
+                >
+                  Procesar HTML pegado
+                </button>
+              </details>
+              <div className="adicionales-planilla-list" role="list">
+                {adicionalesEfectivos.map((def) => (
+                  <div
+                    key={def.id}
+                    className="adicional-planilla-row"
+                    role="listitem"
+                  >
+                    <span className="adic-label">{def.concepto}</span>
+                    <span className="adic-meta">
+                      {def.kind === 'fijo' ? formatArs(def.importe) : null}
+                      {def.kind === 'pct_basico' ? (
+                        <>
+                          {def.porcentaje}% s/ básico
+                          {basicoMensual > 0
+                            ? ` → ${formatArs(
+                                roundMoney(
+                                  (basicoMensual * def.porcentaje) / 100,
+                                ),
+                              )}`
+                            : ' (sin básico cargado)'}
+                        </>
+                      ) : null}
+                      {def.kind === 'por_unidad' ? (
+                        <>
+                          {formatArs(def.importePorUnidad)} ×{' '}
+                          <label className="adic-unidades-wrap">
+                            <input
+                              type="number"
+                              className="adic-unidades"
+                              min={1}
+                              step={1}
+                              value={unidadesRetiroResiduos}
+                              onChange={(e) =>
+                                setUnidadesRetiroResiduos(
+                                  Math.max(
+                                    1,
+                                    Number.parseInt(e.target.value, 10) || 1,
+                                  ),
+                                )
+                              }
+                              aria-label="Unidades (retiro de residuos)"
+                            />{' '}
+                            u.
+                          </label>
+                        </>
+                      ) : null}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn subtle adic-add-btn"
+                      onClick={() => agregarLineaAdicionalPlanilla(def)}
+                    >
+                      Agregar al recibo
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="convenio-block uthgra">
@@ -668,87 +1498,210 @@ function App() {
         </section>
 
         <section className="recibo-wrap" aria-label="Vista de recibo">
-          <article className="recibo" ref={reciboRef}>
-            <header className="recibo-header">
-              <div>
-                <h2 className="recibo-title">Recibo de haberes</h2>
-                <p className="recibo-periodo">Período: {periodoLabel}</p>
-              </div>
-              <div className="recibo-org">
-                <strong>{consorcioNombre || '—'}</strong>
-                <span>CUIT: {consorcioCuit || '—'}</span>
-                <span>{consorcioDomicilio || '—'}</span>
-              </div>
-            </header>
+          <article className="recibo recibo-lct" ref={reciboRef}>
+            <div className="lct-banner">
+              <span className="lct-banner-title">Recibo de haberes — Ley 20.744</span>
+              <span className="lct-banner-sub">
+                Modelo art. 140 LCT — referencia consorcio / encargado
+              </span>
+            </div>
 
-            <div className="recibo-empleado">
-              <div>
-                <span className="label">Empleado</span>
-                <span>{empleadoNombre || '—'}</span>
+            <div className="lct-top-grid">
+              <div className="lct-box lct-empleador">
+                <div className="lct-box-label">Empleador</div>
+                <div className="lct-box-strong">{consorcioNombre || '—'}</div>
+                <div>C.U.I.T.: {consorcioCuit || '—'}</div>
+                <div>{consorcioDomicilio || '—'}</div>
               </div>
-              <div>
-                <span className="label">CUIL</span>
-                <span>{empleadoCuil || '—'}</span>
-              </div>
-              {fechaIngreso ? (
-                <div>
-                  <span className="label">Fecha de ingreso</span>
-                  <span>{fechaIngreso}</span>
-                </div>
-              ) : null}
-              <div className="span-row">
-                <span className="label">Categoría</span>
-                <span>{empleadoCategoria || '—'}</span>
+              <div className="lct-box lct-periodo">
+                <div className="lct-box-label">Período de pago</div>
+                <div className="lct-periodo-val">{periodoLabel.toUpperCase()}</div>
+                <div className="lct-original">Original</div>
               </div>
             </div>
 
-            <table className="recibo-table">
+            <div className="lct-empleado-grid">
+              <div className="lct-cell">
+                <span className="lct-lbl">Apellido y nombre</span>
+                <span>{empleadoNombre || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">C.U.I.L.</span>
+                <span>{empleadoCuil || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Legajo Nº</span>
+                <span>{reciboLegajo || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Tipo de contrato</span>
+                <span>{reciboTipoContrato || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Obra social</span>
+                <span>{reciboObraSocial || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">C.C.T.</span>
+                <span>{cctRecibo}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Fecha de ingreso</span>
+                <span>{fechaIngreso || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Antig. reconocida</span>
+                <span>{reciboAntiguedadReconocida || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Básico</span>
+                <span className="lct-num">{formatArs(basicoMensual)}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Categoría</span>
+                <span>{empleadoCategoria || '—'}</span>
+              </div>
+              <div className="lct-cell lct-span-2">
+                <span className="lct-lbl">Tarea desempeñada</span>
+                <span>{reciboTareaDesempeniada || empleadoCategoria || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Último depósito</span>
+                <span>{reciboUltimoDeposito || '—'}</span>
+              </div>
+              <div className="lct-cell">
+                <span className="lct-lbl">Período de pago</span>
+                <span>{periodoPagoCorto}</span>
+              </div>
+              <div className="lct-cell lct-span-2">
+                <span className="lct-lbl">Banco</span>
+                <span>{reciboBanco || '—'}</span>
+              </div>
+            </div>
+
+            <table className="lct-main-table">
               <thead>
                 <tr>
-                  <th>Concepto</th>
-                  <th className="num">Importe</th>
+                  <th className="lct-col-concepto">Conceptos</th>
+                  <th className="lct-col-un">Un.</th>
+                  <th className="lct-col-num">Remunerativo</th>
+                  <th className="lct-col-num">No remunerativo</th>
+                  <th className="lct-col-num">Descuentos</th>
                 </tr>
               </thead>
               <tbody>
-                <tr className="section-row">
-                  <td colSpan={2}>Haberes</td>
+                <tr className="lct-section-row">
+                  <td colSpan={5}>Haberes y conceptos remunerativos</td>
                 </tr>
-                {haberes.map((l) => (
+                {haberes.map((l, i) => (
                   <tr key={l.id}>
                     <td>{l.concepto || '—'}</td>
-                    <td className="num">{formatArs(l.importe)}</td>
+                    <td className="lct-col-un">{unidadHaberEnRecibo(l, i)}</td>
+                    <td className="lct-col-num">{formatArs(l.importe)}</td>
+                    <td className="lct-col-num">—</td>
+                    <td className="lct-col-num">—</td>
                   </tr>
                 ))}
-                <tr className="subtotal-row">
-                  <td>Subtotal haberes</td>
-                  <td className="num">{formatArs(totalHaberes)}</td>
-                </tr>
-                <tr className="section-row">
-                  <td colSpan={2}>Descuentos</td>
+                <tr className="lct-section-row">
+                  <td colSpan={5}>Descuentos</td>
                 </tr>
                 {descuentos.map((l) => (
                   <tr key={l.id}>
                     <td>{l.concepto || '—'}</td>
-                    <td className="num">-{formatArs(l.importe)}</td>
+                    <td className="lct-col-un">{unidadDescuentoEnRecibo(l)}</td>
+                    <td className="lct-col-num">—</td>
+                    <td className="lct-col-num">—</td>
+                    <td className="lct-col-num">{formatArs(l.importe)}</td>
                   </tr>
                 ))}
-                <tr className="subtotal-row">
-                  <td>Total descuentos</td>
-                  <td className="num">-{formatArs(totalDescuentos)}</td>
+                <tr className="lct-totales-row">
+                  <td colSpan={2}>TOTALES</td>
+                  <td className="lct-col-num">{formatArs(totalHaberes)}</td>
+                  <td className="lct-col-num">
+                    {totalNoRemunerativo > 0
+                      ? formatArs(totalNoRemunerativo)
+                      : '—'}
+                  </td>
+                  <td className="lct-col-num">{formatArs(totalDescuentos)}</td>
                 </tr>
               </tbody>
             </table>
 
-            <footer className="recibo-footer">
-              <div className="neto">
-                <span>Líquido a percibir</span>
-                <strong>{formatArs(neto)}</strong>
+            <div className="lct-neto-block">
+              <div className="lct-neto-label">Neto a cobrar</div>
+              <div className="lct-neto-val">{formatArs(neto)}</div>
+            </div>
+            <p className="lct-letras">{sonPesosEnLetras(neto)}</p>
+            <p className="lct-cbu">
+              <span className="lct-lbl">CBU</span> {reciboCbu || '—'}
+            </p>
+
+            <div className="lct-contrib-head">
+              Contribuciones y/o conceptos abonados por el empleador
+            </div>
+            <div className="lct-contrib-grid">
+              <table className="lct-contrib-table">
+                <thead>
+                  <tr>
+                    <th>Concepto</th>
+                    <th>Un. (%)</th>
+                    <th className="lct-col-num">Importe</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {LCT_CONTRIB_IZQ.map((c) => (
+                    <tr key={c}>
+                      <td>{c}</td>
+                      <td>—</td>
+                      <td className="lct-col-num">—</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="lct-contrib-table">
+                <thead>
+                  <tr>
+                    <th>Concepto</th>
+                    <th>Un. (%)</th>
+                    <th className="lct-col-num">Importe</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {LCT_CONTRIB_DER.map((c) => (
+                    <tr key={c}>
+                      <td>{c}</td>
+                      <td>—</td>
+                      <td className="lct-col-num">—</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="lct-contrib-foot">
+              <span>Total contribuciones y otros conceptos (empleador)</span>
+              <span className="lct-col-num">—</span>
+            </div>
+
+            <footer className="lct-footer">
+              <div className="lct-firma-grid">
+                <div>
+                  <div className="lct-lbl">Lugar y fecha de pago</div>
+                  <div>
+                    {reciboLugarPago || consorcioDomicilio || '—'} —{' '}
+                    {new Date(anio, mesIdx, 15).toLocaleDateString('es-AR')}
+                  </div>
+                </div>
+                <div className="lct-firma-line">
+                  <div className="lct-lbl">Firma del empleado</div>
+                  <div className="lct-firma-rule" />
+                </div>
               </div>
-              <p className="legal">
-                Documento generado para uso interno del consorcio. Los importes y
-                retenciones deben coincidir con la liquidación oficial y las
-                alícuotas vigentes. Las escalas y porcentajes del simulador son
-                referenciales.
+              <p className="legal lct-legal">
+                Recibí conforme la suma indicada en concepto de haberes según la
+                presente liquidación, de conformidad con el art. 140 de la Ley de
+                Contrato de Trabajo. Documento generado como ayuda al consorcio: los
+                importes deben coincidir con la liquidación oficial y actuación
+                homologada.
               </p>
             </footer>
           </article>
@@ -779,6 +1732,14 @@ function MoneyLinesEditor({
             onChange={(e) => onUpdate(row.id, { concepto: e.target.value })}
             placeholder={emptyConcept}
             aria-label={`${emptyConcept} ${row.id}`}
+          />
+          <input
+            className="line-unidad"
+            value={row.unidad ?? ''}
+            onChange={(e) => onUpdate(row.id, { unidad: e.target.value })}
+            placeholder="Un."
+            title="Unidades, días o % (columna Un. del recibo LCT)"
+            aria-label="Unidad"
           />
           <input
             className="line-amount"
